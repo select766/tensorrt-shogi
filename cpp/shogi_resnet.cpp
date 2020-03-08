@@ -37,7 +37,7 @@
 #include "common.h"
 #include "buffers.h"
 
-const int batchSize = 1;
+const int batchSize = 64;
 const int skipSample = 0;
 std::vector<std::string> inputTensorNames;
 std::vector<std::string> outputTensorNames;
@@ -133,6 +133,11 @@ bool SampleOnnxMNIST::build()
     {
         return false;
     }
+    auto profile = builder->createOptimizationProfile();
+    profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMIN, Dims4{1,119,9,9});
+    profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kOPT, Dims4{batchSize,119,9,9});
+    profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMAX, Dims4{batchSize,119,9,9});
+    config->addOptimizationProfile(profile);
 
     mEngine = std::shared_ptr<nvinfer1::ICudaEngine>(
         builder->buildEngineWithConfig(*network, *config), samplesCommon::InferDeleter());
@@ -199,15 +204,18 @@ bool SampleOnnxMNIST::constructNetwork(SampleUniquePtr<nvinfer1::IBuilder>& buil
 //!
 bool SampleOnnxMNIST::infer()
 {
-    // Create RAII buffer manager object
-    samplesCommon::BufferManager buffers(mEngine, batchSize);
-
-    auto context = SampleUniquePtr<nvinfer1::IExecutionContext>(mEngine->createExecutionContext());
+    gLogInfo << "createExecutionContext" << std::endl;
+    auto context = mEngine->createExecutionContext();
     if (!context)
     {
         return false;
     }
+    context->setBindingDimensions(0, Dims4{batchSize,119,9,9});
+    gLogInfo << "BufferManager" << std::endl;
+    // Create RAII buffer manager object
+    samplesCommon::BufferManager buffers(mEngine, batchSize, context);
 
+    gLogInfo << "processInput" << std::endl;
     // Read the input data into the managed buffers
     assert(inputTensorNames.size() == 1);
     if (!processInput(buffers))
@@ -215,19 +223,22 @@ bool SampleOnnxMNIST::infer()
         return false;
     }
 
+    gLogInfo << "copyInputToDevice" << std::endl;
     // Memcpy from host input buffers to device input buffers
     buffers.copyInputToDevice();
 
+    gLogInfo << "executeV2" << std::endl;
     bool status = context->executeV2(buffers.getDeviceBindings().data());
-    //bool status = context->execute(batchSize, buffers.getDeviceBindings().data());
     if (!status)
     {
         return false;
     }
 
+    gLogInfo << "copyOutputToHost" << std::endl;
     // Memcpy from device output buffers to host output buffers
     buffers.copyOutputToHost();
 
+    gLogInfo << "verifyOutput" << std::endl;
     // Verify results
     if (!verifyOutput(buffers))
     {
