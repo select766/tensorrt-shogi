@@ -1,10 +1,13 @@
-TARGETS = shogi_resnet mnist
+TARGETS = shogi_resnet mnist bench
 TENSORRT_DIR = ../../TensorRT-7.0.0.11
 LDFLAGS = -L"/usr/local/cuda/lib64" -L"/usr/local/cuda/lib64" -L"${TENSORRT_DIR}/lib" -Wl,--start-group -lnvinfer -lnvparsers -lnvinfer_plugin -lnvonnxparser -lcudnn -lcublas -lcudart -lrt -ldl -lpthread -lmyelin -lnvrtc -Wl,--end-group
 
 all: $(TARGETS)
 
 mnist: mnist.o logger.o
+	g++ -o $@ $^ $(LDFLAGS)
+
+bench: bench.o logger.o
 	g++ -o $@ $^ $(LDFLAGS)
 
 shogi_resnet: shogi_resnet.o logger.o
