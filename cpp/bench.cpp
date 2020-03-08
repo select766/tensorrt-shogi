@@ -34,12 +34,24 @@
 
 static int batchSizeMin = 1;
 static int batchSizeMax = 256;
-static int batchSize = 256;
+static int batchSize = 1;
 const bool fp16 = false;
 const bool verifyMode = false;
 static int skipSample = 0;
 static std::vector<std::string> inputTensorNames;
 static std::vector<std::string> outputTensorNames;
+
+std::string addProfileSuffix(const std::string& name, int profile)
+{
+    std::ostringstream oss;
+    oss << name;
+    if (profile > 0)
+    {
+    oss << " [profile " << profile << "]";
+    }
+    
+    return oss.str();
+}
 
 //! \brief  The ShogiOnnx class implements the ONNX MNIST sample
 //!
@@ -72,7 +84,8 @@ private:
     nvinfer1::Dims mOutputValueDims;  //!< The dimensions of the output to the network.
 
     std::shared_ptr<nvinfer1::ICudaEngine> mEngine;        //!< The TensorRT engine used to run the network
-    std::shared_ptr<nvinfer1::IExecutionContext> mContext; //!< The TensorRT engine used to run the network
+    std::map<int, std::shared_ptr<nvinfer1::IExecutionContext> > mContextForProfile;
+    std::vector<int> profileForBatchSize;
 
     //!
     //! \brief Parses an ONNX model for MNIST and creates a TensorRT network
@@ -132,11 +145,44 @@ bool ShogiOnnx::build()
     {
         return false;
     }
-    auto profile = builder->createOptimizationProfile();
-    profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMIN, Dims4{1, 119, 9, 9});
-    profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kOPT, Dims4{batchSizeMax, 119, 9, 9});
-    profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMAX, Dims4{batchSizeMax, 119, 9, 9});
-    config->addOptimizationProfile(profile);
+    if (false)
+    {
+        auto profile = builder->createOptimizationProfile();
+        profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMIN, Dims4{1, 119, 9, 9});
+        profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kOPT, Dims4{batchSizeMax, 119, 9, 9});
+        profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMAX, Dims4{batchSizeMax, 119, 9, 9});
+        int profileIdx = config->addOptimizationProfile(profile);
+        profileForBatchSize.resize(batchSizeMax + 1);
+        for (int b = 1; b <= batchSizeMax; b++)
+        {
+            profileForBatchSize[b] = profileIdx;
+        }
+    }
+    else
+    {
+        int bs = 1;
+        int lastbs = 0;
+        profileForBatchSize.resize(batchSizeMax + 1);
+        while (lastbs < batchSizeMax)
+        {
+            auto profile = builder->createOptimizationProfile();
+            if (bs > batchSizeMax)
+            {
+                bs = batchSizeMax;
+            }
+            profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMIN, Dims4{lastbs + 1, 119, 9, 9});
+            profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kOPT, Dims4{bs, 119, 9, 9});
+            profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMAX, Dims4{bs, 119, 9, 9});
+            int profileIdx = config->addOptimizationProfile(profile);
+            for (int b = lastbs + 1; b <= bs; b++)
+            {
+                profileForBatchSize[b] = profileIdx;
+            }
+
+            lastbs = bs;
+            bs *= 4;
+        }
+    }
 
     mEngine = std::shared_ptr<nvinfer1::ICudaEngine>(
         builder->buildEngineWithConfig(*network, *config), samplesCommon::InferDeleter());
@@ -145,10 +191,16 @@ bool ShogiOnnx::build()
         return false;
     }
 
-    mContext = std::shared_ptr<nvinfer1::IExecutionContext>(mEngine->createExecutionContext(), samplesCommon::InferDeleter());
-    if (!mContext)
+    // different context for each profile is needed (switching causes error on setBindingDimensions)
+    for (int i = 0; i < mEngine->getNbOptimizationProfiles(); i++)
     {
-        return false;
+        auto ctx = std::shared_ptr<nvinfer1::IExecutionContext>(mEngine->createExecutionContext(), samplesCommon::InferDeleter());
+        if (!ctx)
+        {
+            return false;
+        }
+        ctx->setOptimizationProfile(i);
+        mContextForProfile[i] = ctx;
     }
 
     assert(network->getNbInputs() == 1);
@@ -159,7 +211,7 @@ bool ShogiOnnx::build()
     mOutputPolicyDims = network->getOutput(0)->getDimensions();
     assert(mOutputPolicyDims.nbDims == 2);
     mOutputValueDims = network->getOutput(1)->getDimensions();
-    assert(mOutputValueDims.nbDims == 2);
+    assert(mOutputValueDims.nbDims == 2);    
 
     return true;
 }
@@ -209,7 +261,10 @@ bool ShogiOnnx::constructNetwork(SampleUniquePtr<nvinfer1::IBuilder> &builder,
 //!
 bool ShogiOnnx::infer()
 {
-    mContext->setBindingDimensions(0, Dims4{batchSize, 119, 9, 9});
+    auto mContext = mContextForProfile.at(profileForBatchSize[batchSize]);
+    std::string inputBindingName = addProfileSuffix(inputTensorNames[0], profileForBatchSize[batchSize]);
+    int bidx = mEngine->getBindingIndex(inputBindingName.c_str());
+    mContext->setBindingDimensions(bidx, Dims4{batchSize, 119, 9, 9});
     // Create RAII buffer manager object
     samplesCommon::BufferManager buffers(mEngine, batchSize, mContext.get());
 
@@ -250,7 +305,9 @@ bool ShogiOnnx::processInput(const samplesCommon::BufferManager &buffers)
     const int inputH = mInputDims.d[2];
     const int inputW = mInputDims.d[3];
 
-    float *hostDataBuffer = static_cast<float *>(buffers.getHostBuffer(inputTensorNames[0]));
+    std::string inputName = addProfileSuffix(inputTensorNames[0], profileForBatchSize[batchSize]);
+    
+    float *hostDataBuffer = static_cast<float *>(buffers.getHostBuffer(inputName));
     if (verifyMode)
     {
         ifstream fin("data/trt/inputs.bin", ios::in | ios::binary);
@@ -301,9 +358,11 @@ bool ShogiOnnx::verifyOutput(const samplesCommon::BufferManager &buffers)
         return true;
     }
     const int outputPolicySize = mOutputPolicyDims.d[1];
-    float *outputPolicy = static_cast<float *>(buffers.getHostBuffer(outputTensorNames[0]));
+    std::string outputPName = addProfileSuffix(outputTensorNames[0], profileForBatchSize[batchSize]);
+    float *outputPolicy = static_cast<float *>(buffers.getHostBuffer(outputPName));
     const int outputValueSize = mOutputValueDims.d[1];
-    float *outputValue = static_cast<float *>(buffers.getHostBuffer(outputTensorNames[1]));
+    std::string outputVName = addProfileSuffix(outputTensorNames[1], profileForBatchSize[batchSize]);
+    float *outputValue = static_cast<float *>(buffers.getHostBuffer(outputVName));
     ifstream finPolicy("data/trt/policys.bin", ios::in | ios::binary);
     finPolicy.seekg(outputPolicySize * skipSample * sizeof(float));
     std::vector<float> expectedPolicy(outputPolicySize * batchSize);

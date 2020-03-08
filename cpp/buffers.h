@@ -247,9 +247,12 @@ public:
         const nvinfer1::IExecutionContext* context = nullptr)
         : mEngine(engine)
         , mBatchSize(batchSize)
+        , mContext(context)
     {
+        int nbPerProfile = mEngine->getNbBindings() / mEngine->getNbOptimizationProfiles();
+        int nProfile = context ? context->getOptimizationProfile() : 0;
         // Create host and device buffers
-        for (int i = 0; i < mEngine->getNbBindings(); i++)
+        for (int i = nProfile * nbPerProfile; i < (nProfile + 1) * nbPerProfile; i++)
         {
             auto dims = context ? context->getBindingDimensions(i) : mEngine->getBindingDimensions(i);
             size_t vol = context ? 1 : static_cast<size_t>(mBatchSize);
@@ -265,8 +268,8 @@ public:
             std::unique_ptr<ManagedBuffer> manBuf{new ManagedBuffer()};
             manBuf->deviceBuffer = DeviceBuffer(vol, type);
             manBuf->hostBuffer = HostBuffer(vol, type);
-            mDeviceBindings.emplace_back(manBuf->deviceBuffer.data());
-            mManagedBuffers.emplace_back(std::move(manBuf));
+            mDeviceBindings[i] = manBuf->deviceBuffer.data();
+            mManagedBuffers[i] = std::move(manBuf);
         }
     }
 
@@ -274,18 +277,26 @@ public:
     //! \brief Returns a vector of device buffers that you can use directly as
     //!        bindings for the execute and enqueue methods of IExecutionContext.
     //!
-    std::vector<void*>& getDeviceBindings()
+    std::vector<void*> getDeviceBindings()
     {
-        return mDeviceBindings;
+        int nbPerProfile = mEngine->getNbBindings() / mEngine->getNbOptimizationProfiles();
+        int nProfile = mContext ? mContext->getOptimizationProfile() : 0;
+        std::vector<void*> db(mEngine->getNbBindings());
+        // Create host and device buffers
+        for (int i = nProfile * nbPerProfile; i < (nProfile + 1) * nbPerProfile; i++)
+        {
+            db[i] = mDeviceBindings[i];
+        }
+        return db;
     }
 
     //!
     //! \brief Returns a vector of device buffers.
     //!
-    const std::vector<void*>& getDeviceBindings() const
-    {
-        return mDeviceBindings;
-    }
+    // const std::vector<void*>& getDeviceBindings() const
+    // {
+    //     return mDeviceBindings;
+    // }
 
     //!
     //! \brief Returns the device buffer corresponding to tensorName.
@@ -314,7 +325,7 @@ public:
         int index = mEngine->getBindingIndex(tensorName.c_str());
         if (index == -1)
             return kINVALID_SIZE_VALUE;
-        return mManagedBuffers[index]->hostBuffer.nbBytes();
+        return mManagedBuffers.at(index)->hostBuffer.nbBytes();
     }
 
     //!
@@ -417,12 +428,14 @@ private:
         int index = mEngine->getBindingIndex(tensorName.c_str());
         if (index == -1)
             return nullptr;
-        return (isHost ? mManagedBuffers[index]->hostBuffer.data() : mManagedBuffers[index]->deviceBuffer.data());
+        return (isHost ? mManagedBuffers.at(index)->hostBuffer.data() : mManagedBuffers.at(index)->deviceBuffer.data());
     }
 
     void memcpyBuffers(const bool copyInput, const bool deviceToHost, const bool async, const cudaStream_t& stream = 0)
     {
-        for (int i = 0; i < mEngine->getNbBindings(); i++)
+        int nbPerProfile = mEngine->getNbBindings() / mEngine->getNbOptimizationProfiles();
+        int nProfile = mContext ? mContext->getOptimizationProfile() : 0;
+        for (int i = nProfile * nbPerProfile; i < (nProfile + 1) * nbPerProfile; i++)
         {
             void* dstPtr
                 = deviceToHost ? mManagedBuffers[i]->hostBuffer.data() : mManagedBuffers[i]->deviceBuffer.data();
@@ -442,8 +455,9 @@ private:
 
     std::shared_ptr<nvinfer1::ICudaEngine> mEngine;              //!< The pointer to the engine
     int mBatchSize;                                              //!< The batch size
-    std::vector<std::unique_ptr<ManagedBuffer>> mManagedBuffers; //!< The vector of pointers to managed buffers
-    std::vector<void*> mDeviceBindings; //!< The vector of device buffers needed for engine execution
+    std::map<int, std::unique_ptr<ManagedBuffer>> mManagedBuffers; //!< The vector of pointers to managed buffers
+    std::map<int, void*> mDeviceBindings; //!< The vector of device buffers needed for engine execution
+    const nvinfer1::IExecutionContext* mContext;
 };
 
 } // namespace samplesCommon
