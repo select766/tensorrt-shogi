@@ -15,9 +15,7 @@ python -m pttrain.export_mnist
 ```
 
 ```
-cd cpp
-./compile.sh
-cd ..
+cd cpp && make && cd ..
 ```
 
 実行
