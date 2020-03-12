@@ -42,12 +42,12 @@ static int batchSizeMin = 1;
 static int batchSizeMax = 16;
 static int nGPU = 1;
 static int nThreadPerGPU = 2;
-const bool fp16 = false;
-const bool verifyMode = false;
+static bool fp16 = false;
+static bool verifyMode = false;
 static int skipSample = 0;
 static std::vector<std::string> inputTensorNames;
 static std::vector<std::string> outputTensorNames;
-static std::vector<std::mutex*> gpuMutexes;
+static std::vector<std::mutex *> gpuMutexes;
 static std::mutex resultMutex;
 static std::atomic_bool waitBenchStart;
 static std::atomic_bool continueBench;
@@ -392,7 +392,9 @@ bool ShogiOnnx::verifyOutput(const samplesCommon::BufferManager &buffers, int ba
     return ok;
 }
 
-void threadMain(int device)
+std::vector<ShogiOnnx *> runnerForGPU;
+
+void threadMain(int device, int threadInDevice)
 {
     std::random_device seed_gen;
     std::mt19937 engine(seed_gen());
@@ -403,32 +405,36 @@ void threadMain(int device)
         return;
     }
 
-    ShogiOnnx runner;
-    if (!runner.build())
+    ShogiOnnx *pRunner;
+    if (threadInDevice == 0)
     {
-        gLogError << "build failed" << std::endl;
-        return;
-    }
-
-    // dummy run
-    for (int dummyBatchSize = batchSizeMin; dummyBatchSize <= batchSizeMax; dummyBatchSize *= 2)
-    {
-        gpuMutexes[device]->lock();
-        if (!runner.infer(dummyBatchSize))
+        pRunner = new ShogiOnnx();
+        if (!pRunner->build())
         {
-            gLogError << "dummy infer failed" << std::endl;
+            gLogError << "build failed" << std::endl;
             return;
         }
-        gpuMutexes[device]->unlock();
+
+        // dummy run
+        for (int dummyBatchSize = batchSizeMin; dummyBatchSize <= batchSizeMax; dummyBatchSize *= 2)
+        {
+            if (!pRunner->infer(dummyBatchSize))
+            {
+                gLogError << "dummy infer failed" << std::endl;
+                return;
+            }
+        }
+        runnerForGPU[device] = pRunner;
     }
 
+    gLogInfo << "dummy infer end" << std::endl;
     nThreadInitialized++;
-    gLogError << "dummy infer end" << std::endl;
 
     while (waitBenchStart)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    pRunner = runnerForGPU[device];
 
     std::vector<int> counts(batchSizeMax + 1);
     std::vector<long long> timesum(batchSizeMax + 1);
@@ -438,7 +444,7 @@ void threadMain(int device)
         gpuMutexes[device]->lock();
         timespec timestart, timeend;
         clock_gettime(CLOCK_REALTIME, &timestart);
-        if (!runner.infer(batchSize))
+        if (!pRunner->infer(batchSize))
         {
             gLogError << "infer failed" << std::endl;
             return;
@@ -450,19 +456,22 @@ void threadMain(int device)
         timesum[batchSize] += nsec;
     }
     resultMutex.lock();
+    int allCounts = 0;
     for (int bs = 0; bs <= batchSizeMax; bs++)
     {
+        allCounts += bs * counts[bs];
         totalCounts[bs] += counts[bs];
         totalTimesum[bs] += timesum[bs];
     }
+    std::cout << "GPU " << device << " thread " << threadInDevice << " samples " << allCounts << std::endl;
     resultMutex.unlock();
 }
 
 int main(int argc, char **argv)
 {
-    if (argc != 6)
+    if (argc != 9)
     {
-        std::cerr << "usage: multi_gpu_bench nGPU nThreadPerGPU batchSizeMin batchSizeMax benchTime" << std::endl;
+        std::cerr << "usage: multi_gpu_bench nGPU nThreadPerGPU batchSizeMin batchSizeMax benchTime verify suppressStdout fp16" << std::endl;
         return 1;
     }
     nGPU = atoi(argv[1]);
@@ -470,6 +479,14 @@ int main(int argc, char **argv)
     batchSizeMin = atoi(argv[3]);
     batchSizeMax = atoi(argv[4]);
     int benchTime = atoi(argv[5]);
+    verifyMode = atoi(argv[6]) != 0;
+    bool suppressStdout = atoi(argv[7]) != 0;
+    fp16 = atoi(argv[8]) != 0;
+    if (suppressStdout)
+    {
+        // TensorRTから発生するメッセージを抑制(gLogError << "")
+        setReportableSeverity(Logger::Severity::kINTERNAL_ERROR);
+    }
     inputTensorNames.push_back("input");
     outputTensorNames.push_back("output_policy");
     outputTensorNames.push_back("output_value");
@@ -481,6 +498,7 @@ int main(int argc, char **argv)
     }
     totalCounts.resize(batchSizeMax + 1);
     totalTimesum.resize(batchSizeMax + 1);
+    runnerForGPU.resize(nGPU);
     nThreadInitialized = 0;
     int nThreads = nGPU * nThreadPerGPU;
     std::vector<std::thread *> threads;
@@ -489,7 +507,7 @@ int main(int argc, char **argv)
     {
         for (int threadInDevice = 0; threadInDevice < nThreadPerGPU; threadInDevice++)
         {
-            threads.push_back(new std::thread(threadMain, device));
+            threads.push_back(new std::thread(threadMain, device, threadInDevice));
         }
     }
 
