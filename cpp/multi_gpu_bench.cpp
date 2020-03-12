@@ -43,6 +43,7 @@ static int batchSizeMax = 16;
 static int nGPU = 1;
 static int nThreadPerGPU = 2;
 static bool fp16 = false;
+static bool fp8 = false;
 static bool verifyMode = false;
 static int skipSample = 0;
 static std::vector<std::string> inputTensorNames;
@@ -252,7 +253,14 @@ bool ShogiOnnx::constructNetwork(SampleUniquePtr<nvinfer1::IBuilder> &builder,
 
     builder->setMaxBatchSize(batchSizeMax);
     config->setMaxWorkspaceSize(1024_MiB);
-    if (fp16)
+
+    if (fp8)
+    {
+        gLogInfo << "INT8 mode (scale is not correctly set!)" << std::endl;
+        config->setFlag(BuilderFlag::kINT8);
+        samplesCommon::setAllTensorScales(network.get(), 127.0f, 127.0f);
+    }
+    else if (fp16)
     {
         gLogInfo << "FP16 mode" << std::endl;
         config->setFlag(BuilderFlag::kFP16);
@@ -471,7 +479,7 @@ int main(int argc, char **argv)
 {
     if (argc != 9)
     {
-        std::cerr << "usage: multi_gpu_bench nGPU nThreadPerGPU batchSizeMin batchSizeMax benchTime verify suppressStdout fp16" << std::endl;
+        std::cerr << "usage: multi_gpu_bench nGPU nThreadPerGPU batchSizeMin batchSizeMax benchTime verify suppressStdout fpbit" << std::endl;
         return 1;
     }
     nGPU = atoi(argv[1]);
@@ -481,7 +489,15 @@ int main(int argc, char **argv)
     int benchTime = atoi(argv[5]);
     verifyMode = atoi(argv[6]) != 0;
     bool suppressStdout = atoi(argv[7]) != 0;
-    fp16 = atoi(argv[8]) != 0;
+    int fpbit = atoi(argv[8]);
+    if (fpbit == 8)
+    {
+        fp8 = true;
+    }
+    else if (fpbit == 16)
+    {
+        fp16 = true;
+    }
     if (suppressStdout)
     {
         // TensorRTから発生するメッセージを抑制(gLogError << "")
