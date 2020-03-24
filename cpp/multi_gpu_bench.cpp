@@ -38,6 +38,7 @@
 #include "common.h"
 #include "buffers.h"
 
+static bool useMultiProfile = true;
 static int batchSizeMin = 1;
 static int batchSizeMax = 16;
 static int nGPU = 1;
@@ -55,6 +56,7 @@ static std::atomic_bool continueBench;
 static std::atomic_int nThreadInitialized;
 std::vector<int> totalCounts;
 std::vector<long long> totalTimesum;
+std::string serializePath("/var/tmp/multi_gpu_bench.bin");
 
 std::string addProfileSuffix(const std::string &name, int profile)
 {
@@ -66,6 +68,12 @@ std::string addProfileSuffix(const std::string &name, int profile)
     }
 
     return oss.str();
+}
+
+bool checkSerializedFile()
+{
+    ifstream f(serializePath, ios::in | ios::binary);
+    return f.is_open();
 }
 
 //! \brief  The ShogiOnnx class implements the ONNX MNIST sample
@@ -87,6 +95,13 @@ public:
     //! \brief Function builds the network engine
     //!
     bool build();
+
+    bool serialize();
+
+    //!
+    //! \brief Function deserialize the network engine from file
+    //!
+    bool load();
 
     //!
     //! \brief Runs the TensorRT inference engine for this sample
@@ -160,7 +175,7 @@ bool ShogiOnnx::build()
     {
         return false;
     }
-    if (false)
+    if (!useMultiProfile)
     {
         auto profile = builder->createOptimizationProfile();
         profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMIN, Dims4{1, 119, 9, 9});
@@ -231,6 +246,77 @@ bool ShogiOnnx::build()
     return true;
 }
 
+bool ShogiOnnx::serialize()
+{
+    IHostMemory *serializedModel = mEngine->serialize();
+
+    ofstream serializedModelFile(serializePath, ios::binary);
+    serializedModelFile.write((const char *)serializedModel->data(), serializedModel->size());
+
+    return true;
+}
+
+bool ShogiOnnx::load()
+{
+    ifstream serializedModelFile(serializePath, ios::in | ios::binary);
+    serializedModelFile.seekg(0, ios_base::end);
+    size_t fsize = serializedModelFile.tellg();
+    serializedModelFile.seekg(0, ios_base::beg);
+    std::vector<char> fdata(fsize);
+    serializedModelFile.read((char *)fdata.data(), fsize);
+
+    auto runtime = createInferRuntime(gLogger);
+    mEngine = std::shared_ptr<nvinfer1::ICudaEngine>(runtime->deserializeCudaEngine(fdata.data(), fsize, nullptr), samplesCommon::InferDeleter());
+
+    mInputDims = Dims4{1, 119, 9, 9};
+    mOutputPolicyDims = Dims2{1, 2187};
+    mOutputValueDims = Dims2{1, 2};
+    if (!useMultiProfile)
+    {
+        int profileIdx = 0;//TODO: 本来はシリアライズして保存すべき
+        profileForBatchSize.resize(batchSizeMax + 1);
+        for (int b = 1; b <= batchSizeMax; b++)
+        {
+            profileForBatchSize[b] = profileIdx;
+        }
+    }
+    else
+    {
+        int bs = 1;
+        int lastbs = 0;
+        profileForBatchSize.resize(batchSizeMax + 1);
+        int profileIdx = 0;//TODO: 本来はシリアライズして保存すべき
+        while (lastbs < batchSizeMax)
+        {
+            if (bs > batchSizeMax)
+            {
+                bs = batchSizeMax;
+            }
+            for (int b = lastbs + 1; b <= bs; b++)
+            {
+                profileForBatchSize[b] = profileIdx;
+            }
+
+            lastbs = bs;
+            bs *= 4;
+            profileIdx++;
+        }
+    }
+
+    // different context for each profile is needed (switching causes error on setBindingDimensions)
+    for (int i = 0; i < mEngine->getNbOptimizationProfiles(); i++)
+    {
+        auto ctx = std::shared_ptr<nvinfer1::IExecutionContext>(mEngine->createExecutionContext(), samplesCommon::InferDeleter());
+        if (!ctx)
+        {
+            return false;
+        }
+        ctx->setOptimizationProfile(i);
+        mContextForProfile[i] = ctx;
+    }
+
+    return true;
+}
 //!
 //! \brief Uses a ONNX parser to create the Onnx MNIST Network and marks the
 //!        output layers
@@ -417,10 +503,26 @@ void threadMain(int device, int threadInDevice)
     if (threadInDevice == 0)
     {
         pRunner = new ShogiOnnx();
-        if (!pRunner->build())
+        if (checkSerializedFile())
         {
-            gLogError << "build failed" << std::endl;
-            return;
+            gLogInfo << "using serialized file" << std::endl;
+            if (!pRunner->load())
+            {
+                gLogError << "load failed" << std::endl;
+                return;
+            }
+        }
+        else
+        {
+            if (!pRunner->build())
+            {
+                gLogError << "build failed" << std::endl;
+                return;
+            }
+            if (device == 0)
+            {
+                pRunner->serialize();
+            }
         }
 
         // dummy run
