@@ -43,3 +43,8 @@ LD_LIBRARY_PATH=../TensorRT-7.0.0.11/lib ./cpp/mnist
 ./cpp/multi_gpu_bench 8 1 1 256 30 0 0 32
 ./cpp/multi_gpu_bench 8 1 1 256 30 0 0 16
 ```
+
+# ライセンス
+作者が製作した部分はMITライセンスです。
+
+一部のソースコードは、NVIDIA社のTensorRTサンプルコード(Apache 2.0ライセンス)を改変して作られています。各ソースのヘッダーをご覧ください。
