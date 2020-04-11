@@ -46,6 +46,7 @@ static int nThreadPerGPU = 2;
 static bool fp16 = false;
 static bool fp8 = false;
 static bool verifyMode = false;
+static bool useSerialization = false;
 static int skipSample = 0;
 static std::vector<std::string> inputTensorNames;
 static std::vector<std::string> outputTensorNames;
@@ -508,7 +509,7 @@ void threadMain(int device, int threadInDevice)
     if (threadInDevice == 0)
     {
         pRunner = new ShogiOnnx();
-        if (checkSerializedFile())
+        if (checkSerializedFile() && useSerialization)
         {
             gLogInfo << "using serialized file" << std::endl;
             if (!pRunner->load())
@@ -524,7 +525,7 @@ void threadMain(int device, int threadInDevice)
                 gLogError << "build failed" << std::endl;
                 return;
             }
-            if (device == 0)
+            if (device == 0 && useSerialization)
             {
                 pRunner->serialize();
             }
@@ -585,9 +586,9 @@ void threadMain(int device, int threadInDevice)
 
 int main(int argc, char **argv)
 {
-    if (argc != 10)
+    if (argc != 11)
     {
-        std::cerr << "usage: multi_gpu_bench nGPU nThreadPerGPU batchSizeMin batchSizeMax profileBatchSizeRange benchTime verify suppressStdout fpbit" << std::endl;
+        std::cerr << "usage: multi_gpu_bench nGPU nThreadPerGPU batchSizeMin batchSizeMax profileBatchSizeRange benchTime verify suppressStdout fpbit useSerialization" << std::endl;
         return 1;
     }
     nGPU = atoi(argv[1]);
@@ -607,6 +608,7 @@ int main(int argc, char **argv)
     {
         fp16 = true;
     }
+    useSerialization = atoi(argv[10]) != 0;
     if (suppressStdout)
     {
         // TensorRTから発生するメッセージを抑制(gLogError << "")
