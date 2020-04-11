@@ -32,6 +32,7 @@ LD_LIBRARY_PATH=../TensorRT-7.0.0.11/lib ./cpp/mnist
 
 `multi_gpu_bench.cpp`がそのコード。
 
+## 準備
 モデルは、以下のようなPythonコードでPyTorchのものをONNX形式に変換してから使う。
 
 ```
@@ -57,6 +58,7 @@ torch.onnx.export(model, torch.randn(1, 119, 9, 9), "/path/to/output/file", expo
 
 結果評価用ファイルは、学習データを用いてPyTorchで作成。numpy行列をtofile()で保存したもの。最大バッチサイズ分だけあればよい。
 
+## 実行
 ```
 ./cpp/multi_gpu_bench nGPU nThreadPerGPU batchSizeMin batchSizeMax profileBatchSizeRange benchTime verify suppressStdout fpbit useSerialization
 ```
@@ -76,6 +78,8 @@ torch.onnx.export(model, torch.randn(1, 119, 9, 9), "/path/to/output/file", expo
 ./cpp/multi_gpu_bench 8 1 1 256 1-1-256-256 30 0 0 32
 ./cpp/multi_gpu_bench 8 1 1 256 1-1-256-256 30 0 0 16
 ```
+
+実行結果の表示は、バッチサイズごとに1回の評価にかかった時間と、そこから逆算した1秒当たりに評価できるサンプル数。1GPU当たりの値が表示される。複数GPUを合わせた性能はGPU数を掛けること。
 
 ## バッチサイズごとの最適化プロファイルについて
 profileBatchSizeRange: opt1-max1-opt2-max2...
