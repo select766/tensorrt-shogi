@@ -38,7 +38,7 @@
 #include "common.h"
 #include "buffers.h"
 
-static int profileBatchSizeMultiplier = 0;
+static string profileBatchSizeRange;
 static int batchSizeMin = 1;
 static int batchSizeMax = 16;
 static int nGPU = 1;
@@ -175,7 +175,7 @@ bool ShogiOnnx::build()
     {
         return false;
     }
-    if (!profileBatchSizeMultiplier)
+    if (!profileBatchSizeRange.length())
     {
         auto profile = builder->createOptimizationProfile();
         profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMIN, Dims4{1, 119, 9, 9});
@@ -190,27 +190,26 @@ bool ShogiOnnx::build()
     }
     else
     {
-        int bs = 1;
+        string pbsr = profileBatchSizeRange;
+        replace(pbsr.begin(), pbsr.end(), '-', ' ');
+        istringstream iss(pbsr);
         int lastbs = 0;
         profileForBatchSize.resize(batchSizeMax + 1);
-        while (lastbs < batchSizeMax)
-        {
+        int bs_opt, bs_max;
+        string bs_opt_s, bs_max_s;
+        while (iss >> bs_opt_s >> bs_max_s) {
+            bs_opt = atoi(bs_opt_s.c_str());
+            bs_max = atoi(bs_max_s.c_str());
             auto profile = builder->createOptimizationProfile();
-            if (bs > batchSizeMax)
-            {
-                bs = batchSizeMax;
-            }
             profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMIN, Dims4{lastbs + 1, 119, 9, 9});
-            profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kOPT, Dims4{bs, 119, 9, 9});
-            profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMAX, Dims4{bs, 119, 9, 9});
+            profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kOPT, Dims4{bs_opt, 119, 9, 9});
+            profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMAX, Dims4{bs_max, 119, 9, 9});
             int profileIdx = config->addOptimizationProfile(profile);
-            for (int b = lastbs + 1; b <= bs; b++)
+            for (int b = lastbs + 1; b <= bs_max; b++)
             {
                 profileForBatchSize[b] = profileIdx;
             }
-
-            lastbs = bs;
-            bs *= profileBatchSizeMultiplier;
+            lastbs = bs_max;
         }
     }
 
@@ -271,7 +270,7 @@ bool ShogiOnnx::load()
     mInputDims = Dims4{1, 119, 9, 9};
     mOutputPolicyDims = Dims2{1, 2187};
     mOutputValueDims = Dims2{1, 2};
-    if (!profileBatchSizeMultiplier)
+    if (!profileBatchSizeRange.length())
     {
         int profileIdx = 0; //TODO: 本来はシリアライズして保存すべき
         profileForBatchSize.resize(batchSizeMax + 1);
@@ -282,23 +281,22 @@ bool ShogiOnnx::load()
     }
     else
     {
-        int bs = 1;
+        string pbsr = profileBatchSizeRange;
+        replace(pbsr.begin(), pbsr.end(), '-', ' ');
+        istringstream iss(pbsr);
         int lastbs = 0;
         profileForBatchSize.resize(batchSizeMax + 1);
         int profileIdx = 0; //TODO: 本来はシリアライズして保存すべき
-        while (lastbs < batchSizeMax)
-        {
-            if (bs > batchSizeMax)
-            {
-                bs = batchSizeMax;
-            }
-            for (int b = lastbs + 1; b <= bs; b++)
+        int bs_opt, bs_max;
+        string bs_opt_s, bs_max_s;
+        while (iss >> bs_opt_s >> bs_max_s) {
+            bs_opt = atoi(bs_opt_s.c_str());
+            bs_max = atoi(bs_max_s.c_str());
+            for (int b = lastbs + 1; b <= bs_max; b++)
             {
                 profileForBatchSize[b] = profileIdx;
             }
-
-            lastbs = bs;
-            bs *= profileBatchSizeMultiplier;
+            lastbs = bs_max;
             profileIdx++;
         }
     }
@@ -589,14 +587,14 @@ int main(int argc, char **argv)
 {
     if (argc != 10)
     {
-        std::cerr << "usage: multi_gpu_bench nGPU nThreadPerGPU batchSizeMin batchSizeMax profileBatchSizeMultiplier benchTime verify suppressStdout fpbit" << std::endl;
+        std::cerr << "usage: multi_gpu_bench nGPU nThreadPerGPU batchSizeMin batchSizeMax profileBatchSizeRange benchTime verify suppressStdout fpbit" << std::endl;
         return 1;
     }
     nGPU = atoi(argv[1]);
     nThreadPerGPU = atoi(argv[2]);
     batchSizeMin = atoi(argv[3]);
     batchSizeMax = atoi(argv[4]);
-    profileBatchSizeMultiplier = atoi(argv[5]);
+    profileBatchSizeRange = string(argv[5]);
     int benchTime = atoi(argv[6]);
     verifyMode = atoi(argv[7]) != 0;
     bool suppressStdout = atoi(argv[8]) != 0;
