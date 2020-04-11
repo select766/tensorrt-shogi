@@ -38,7 +38,7 @@
 #include "common.h"
 #include "buffers.h"
 
-static bool useMultiProfile = true;
+static int profileBatchSizeMultiplier = 0;
 static int batchSizeMin = 1;
 static int batchSizeMax = 16;
 static int nGPU = 1;
@@ -175,7 +175,7 @@ bool ShogiOnnx::build()
     {
         return false;
     }
-    if (!useMultiProfile)
+    if (!profileBatchSizeMultiplier)
     {
         auto profile = builder->createOptimizationProfile();
         profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMIN, Dims4{1, 119, 9, 9});
@@ -210,7 +210,7 @@ bool ShogiOnnx::build()
             }
 
             lastbs = bs;
-            bs *= 4;
+            bs *= profileBatchSizeMultiplier;
         }
     }
 
@@ -271,9 +271,9 @@ bool ShogiOnnx::load()
     mInputDims = Dims4{1, 119, 9, 9};
     mOutputPolicyDims = Dims2{1, 2187};
     mOutputValueDims = Dims2{1, 2};
-    if (!useMultiProfile)
+    if (!profileBatchSizeMultiplier)
     {
-        int profileIdx = 0;//TODO: 本来はシリアライズして保存すべき
+        int profileIdx = 0; //TODO: 本来はシリアライズして保存すべき
         profileForBatchSize.resize(batchSizeMax + 1);
         for (int b = 1; b <= batchSizeMax; b++)
         {
@@ -285,7 +285,7 @@ bool ShogiOnnx::load()
         int bs = 1;
         int lastbs = 0;
         profileForBatchSize.resize(batchSizeMax + 1);
-        int profileIdx = 0;//TODO: 本来はシリアライズして保存すべき
+        int profileIdx = 0; //TODO: 本来はシリアライズして保存すべき
         while (lastbs < batchSizeMax)
         {
             if (bs > batchSizeMax)
@@ -298,7 +298,7 @@ bool ShogiOnnx::load()
             }
 
             lastbs = bs;
-            bs *= 4;
+            bs *= profileBatchSizeMultiplier;
             profileIdx++;
         }
     }
@@ -490,9 +490,16 @@ std::vector<ShogiOnnx *> runnerForGPU;
 
 void threadMain(int device, int threadInDevice)
 {
-    std::random_device seed_gen;
-    std::mt19937 engine(seed_gen());
-    std::uniform_int_distribution<> batchSizeDist(batchSizeMin, batchSizeMax); //ランダムにバッチサイズを選択
+    std::random_device seedGen;
+    std::mt19937 rndEngine(seedGen());
+    //ランダムにバッチサイズを選択するが、すべてのパターンが出現するようシャッフルで処理
+    std::vector<int> batchSizeSequence(batchSizeMax - batchSizeMin + 1);
+    for (size_t i = 0; i < batchSizeSequence.size(); i++)
+    {
+        batchSizeSequence[i] = int(i) + batchSizeMin;
+    }
+    std::shuffle(batchSizeSequence.begin(), batchSizeSequence.end(), rndEngine);
+
     if (cudaSetDevice(device) != cudaSuccess)
     {
         gLogError << "cudaSetDevice failed" << std::endl;
@@ -548,9 +555,10 @@ void threadMain(int device, int threadInDevice)
 
     std::vector<int> counts(batchSizeMax + 1);
     std::vector<long long> timesum(batchSizeMax + 1);
+    size_t cnt = 0;
     while (continueBench)
     {
-        int batchSize = batchSizeDist(engine);
+        int batchSize = batchSizeSequence[(cnt++) % batchSizeSequence.size()];
         gpuMutexes[device]->lock();
         timespec timestart, timeend;
         clock_gettime(CLOCK_REALTIME, &timestart);
@@ -579,19 +587,20 @@ void threadMain(int device, int threadInDevice)
 
 int main(int argc, char **argv)
 {
-    if (argc != 9)
+    if (argc != 10)
     {
-        std::cerr << "usage: multi_gpu_bench nGPU nThreadPerGPU batchSizeMin batchSizeMax benchTime verify suppressStdout fpbit" << std::endl;
+        std::cerr << "usage: multi_gpu_bench nGPU nThreadPerGPU batchSizeMin batchSizeMax profileBatchSizeMultiplier benchTime verify suppressStdout fpbit" << std::endl;
         return 1;
     }
     nGPU = atoi(argv[1]);
     nThreadPerGPU = atoi(argv[2]);
     batchSizeMin = atoi(argv[3]);
     batchSizeMax = atoi(argv[4]);
-    int benchTime = atoi(argv[5]);
-    verifyMode = atoi(argv[6]) != 0;
-    bool suppressStdout = atoi(argv[7]) != 0;
-    int fpbit = atoi(argv[8]);
+    profileBatchSizeMultiplier = atoi(argv[5]);
+    int benchTime = atoi(argv[6]);
+    verifyMode = atoi(argv[7]) != 0;
+    bool suppressStdout = atoi(argv[8]) != 0;
+    int fpbit = atoi(argv[9]);
     if (fpbit == 8)
     {
         fp8 = true;
